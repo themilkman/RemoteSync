@@ -26,7 +26,12 @@
       "Bash(python -c \"import py_compile; py_compile.compile\\(''sftp_client.py'', doraise=True\\); print\\(''OK''\\)\")",
       "Bash(icacls \"D:\\\\Servidores\\\\CPanel\\\\DomHostSeo\\\\domhostseo_private_key_openssh\" /inheritance:r /grant:r \"Einelo:\\(R\\)\")",
       "WebFetch(domain:packagecontrol.io)",
-      "WebFetch(domain:docs.sublimetext.io)"
+      "WebFetch(domain:docs.sublimetext.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:forum.sublimetext.com)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "mcp__Claude_in_Chrome__navigate",
+      "mcp__Claude_in_Chrome__computer"
     ]
   }
 }

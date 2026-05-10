@@ -407,11 +407,20 @@ class RemoteSyncUploadPathsCommand(sublime_plugin.WindowCommand):
             if os.path.isdir(path):
                 self.window.run_command("remote_sync_upload_folder", {"dirs": [path]})
             elif os.path.isfile(path):
+                # Always upload from disk — never via the view buffer.
+                # If the file is open in Sublime, the in-memory buffer may be
+                # stale relative to disk (e.g. when an external tool edits the
+                # file but Sublime hasn't reloaded the view yet).  Uploading
+                # via `view.run_command("remote_sync_upload_file")` could send
+                # the OLD buffer content instead of the actual disk content.
+                # Honour `save_before_upload` first so any unsaved Sublime
+                # edits land on disk before the upload, then upload disk.
                 view = self.window.find_open_file(path)
-                if view:
-                    view.run_command("remote_sync_upload_file")
-                else:
-                    self._upload_path(path)
+                if view and view.is_dirty():
+                    config, _ = _get_config_for_file(path, self.window)
+                    if config and config.get("save_before_upload", False):
+                        view.run_command("save")
+                self._upload_path(path)
 
     def _upload_path(self, file_path):
         window = self.window

@@ -12,11 +12,19 @@
                         "children": [
                             {
                                 "caption": "Settings",
-                                "command": "remote_sync_open_settings"
+                                "command": "edit_settings",
+                                "args": {
+                                    "base_file": "${packages}/RemoteSync/RemoteSync.sublime-settings",
+                                    "default": "{\n\t$0\n}\n"
+                                }
                             },
                             {
                                 "caption": "Key Bindings",
-                                "command": "remote_sync_open_keybindings"
+                                "command": "edit_settings",
+                                "args": {
+                                    "base_file": "${packages}/RemoteSync/Default (${platform}).sublime-keymap",
+                                    "default": "[\n\t$0\n]\n"
+                                }
                             },
                             { "caption": "-" },
                             {
