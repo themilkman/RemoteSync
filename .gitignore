@@ -13,3 +13,9 @@ remote-sync-config.json
 # Logs
 *.log
 .claudesync*
+
+# Claude internal settings
+.claude/
+
+# Do not include other git repos cloned inside this folder
+package_control_channel/
