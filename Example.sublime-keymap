@@ -1,0 +1,10 @@
+[
+    // Upload the current file to the remote server
+    { "keys": ["ctrl+shift+u"], "command": "remote_sync_upload_file" },
+
+    // Download the current file from the remote server
+    { "keys": ["ctrl+shift+d"], "command": "remote_sync_download_file" },
+
+    // Cancel all pending operations
+    { "keys": ["ctrl+shift+x"], "command": "remote_sync_cancel" }
+]

@@ -26,6 +26,13 @@
                                     "default": "[\n\t$0\n]\n"
                                 }
                             },
+                            {
+                                "caption": "Key Bindings – Example",
+                                "command": "open_file",
+                                "args": {
+                                    "file": "${packages}/RemoteSync/Example.sublime-keymap"
+                                }
+                            },
                             { "caption": "-" },
                             {
                                 "caption": "Create Config",
