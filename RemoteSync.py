@@ -1,13 +1,22 @@
 """RemoteSync — Free SFTP/FTP/FTPS/SCP plugin for Sublime Text 4.
 
-v2: Modular architecture.  Infrastructure lives in separate modules:
-  - config.py     — load, validate, cache configs
-  - sftp_client.py — SSH/FTP transfer clients
-  - errors.py     — granular exception hierarchy
-  - panel.py      — output panel with auto-truncate
-  - pool.py       — connection pool, parallel ops, retry
-  - queue.py      — serial operation queue
+v2: Modular architecture.  Infrastructure lives in core/:
+  - core/config.py      — load, validate, cache configs
+  - core/sftp_client.py — SSH/FTP transfer clients
+  - core/errors.py      — granular exception hierarchy
+  - core/panel.py       — output panel with auto-truncate
+  - core/pool.py        — connection pool, parallel ops, retry
+  - core/queue.py       — serial operation queue
+  - core/scanner.py     — remote directory scanning
 """
+
+import sys
+
+# kiss-reloader: clear stale core modules so ST reloads them atomically
+# https://github.com/kaste/KissReloader
+_prefix = __spec__.parent + "."
+for _mod in [m for m in sys.modules if m.startswith(_prefix) and m != __name__]:
+    del sys.modules[_mod]
 
 import sublime
 import sublime_plugin
@@ -16,19 +25,19 @@ import re
 import threading
 from functools import wraps
 
-from .config import (
+from .core.config import (
     find_config, load_config, get_remote_path, create_default_config,
     invalidate_cache, CONFIG_FILENAME, should_ignore, get_timeout,
 )
-from .sftp_client import create_client, _shell_quote
-from .errors import (
+from .core.sftp_client import create_client, _shell_quote
+from .core.errors import (
     RemoteConnectionError, ConnectionTimeoutError, ScanTimeoutError,
     ConfigError, is_critical, user_friendly_message,
 )
-from . import panel
-from . import pool
-from .queue import OperationQueue
-from .scanner import fast_scan
+from .core import panel
+from .core import pool
+from .core.queue import OperationQueue
+from .core.scanner import fast_scan
 
 
 # Global operation queue
