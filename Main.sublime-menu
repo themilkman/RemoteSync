@@ -19,10 +19,11 @@
                                 }
                             },
                             {
-                                "caption": "Key Bindings – Example",
-                                "command": "open_file",
+                                "caption": "Key Bindings",
+                                "command": "edit_settings",
                                 "args": {
-                                    "file": "${packages}/RemoteSync/Example.sublime-keymap"
+                                    "base_file": "${packages}/RemoteSync/Example.sublime-keymap",
+                                    "default": "[\n\t$0\n]\n"
                                 }
                             },
                             { "caption": "-" },

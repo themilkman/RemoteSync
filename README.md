@@ -109,6 +109,17 @@ All commands are available via:
 | Setup Remote Server | Create config for selected folder |
 | Edit Server Config | Open config for selected path |
 
+## Disabling the context menu
+
+To disable or customize the context menu:
+
+- Create a `RemoteSync` directory inside your `Packages` directory (find it via **Preferences → Browse Packages**)
+- In that directory place a `Context.sublime-menu` file. You can use this package's [original menu](Context.sublime-menu) as a starting point
+
+This copy overrides the original. You can remove the entries you don't want, or use just `[]` to disable the menu completely.
+
+The same applies to the sidebar menu — use `Side Bar.sublime-menu` instead.
+
 ## License
 
 MIT
