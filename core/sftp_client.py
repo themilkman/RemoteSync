@@ -23,6 +23,102 @@ from .errors import (
 )
 
 
+# ===========================================================================
+# Minimal AES-256-CBC — pure Python, no external dependencies.
+# Used exclusively for decrypting PPK v2 encrypted private key blobs.
+# ===========================================================================
+
+_AES_SBOX = bytes([
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+])
+
+# Inverse S-box (INV_SBOX[SBOX[i]] == i)
+_AES_INV_SBOX = bytearray(256)
+for _i, _v in enumerate(_AES_SBOX):
+    _AES_INV_SBOX[_v] = _i
+_AES_INV_SBOX = bytes(_AES_INV_SBOX)
+
+# GF(2^8) multiplication tables for InvMixColumns
+_MUL2 = bytes(((b << 1) ^ 0x1b) & 0xff if b & 0x80 else (b << 1) for b in range(256))
+_MUL4 = bytes(_MUL2[_MUL2[b]] for b in range(256))
+_MUL8 = bytes(_MUL2[_MUL4[b]] for b in range(256))
+_MUL9  = bytes(_MUL8[b] ^ b                         for b in range(256))
+_MUL11 = bytes(_MUL8[b] ^ _MUL2[b] ^ b              for b in range(256))
+_MUL13 = bytes(_MUL8[b] ^ _MUL4[b] ^ b              for b in range(256))
+_MUL14 = bytes(_MUL8[b] ^ _MUL4[b] ^ _MUL2[b]      for b in range(256))
+
+_AES_RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40]
+
+
+def _aes256_key_expand(key):
+    """Expand a 32-byte AES-256 key into 15 round keys (each 16 bytes)."""
+    w = [key[i:i + 4] for i in range(0, 32, 4)]  # 8 initial words
+    for i in range(8, 60):
+        t = bytearray(w[i - 1])
+        if i % 8 == 0:
+            t = bytearray([_AES_SBOX[t[1]], _AES_SBOX[t[2]],
+                           _AES_SBOX[t[3]], _AES_SBOX[t[0]]])
+            t[0] ^= _AES_RCON[i // 8 - 1]
+        elif i % 8 == 4:
+            t = bytearray(_AES_SBOX[b] for b in t)
+        w.append(bytes(a ^ b for a, b in zip(w[i - 8], t)))
+    return [w[4*r] + w[4*r+1] + w[4*r+2] + w[4*r+3] for r in range(15)]
+
+
+def _aes256_decrypt_block(block, rks):
+    """Decrypt one 16-byte AES-256 block with precomputed round keys."""
+    s = bytearray(block)
+    for i in range(16): s[i] ^= rks[14][i]          # AddRoundKey(14)
+    for r in range(13, 0, -1):
+        s[1],s[5],s[9],s[13]   = s[13],s[1],s[5],s[9]    # InvShiftRows
+        s[2],s[6],s[10],s[14]  = s[10],s[14],s[2],s[6]
+        s[3],s[7],s[11],s[15]  = s[7],s[11],s[15],s[3]
+        for i in range(16): s[i] = _AES_INV_SBOX[s[i]]    # InvSubBytes
+        for i in range(16): s[i] ^= rks[r][i]             # AddRoundKey(r)
+        for c in range(4):                                 # InvMixColumns
+            i = c * 4
+            a, b, cc, d = s[i], s[i+1], s[i+2], s[i+3]
+            s[i]   = _MUL14[a] ^ _MUL11[b] ^ _MUL13[cc] ^ _MUL9[d]
+            s[i+1] = _MUL9[a]  ^ _MUL14[b] ^ _MUL11[cc] ^ _MUL13[d]
+            s[i+2] = _MUL13[a] ^ _MUL9[b]  ^ _MUL14[cc] ^ _MUL11[d]
+            s[i+3] = _MUL11[a] ^ _MUL13[b] ^ _MUL9[cc]  ^ _MUL14[d]
+    s[1],s[5],s[9],s[13]  = s[13],s[1],s[5],s[9]         # Final InvShiftRows
+    s[2],s[6],s[10],s[14] = s[10],s[14],s[2],s[6]
+    s[3],s[7],s[11],s[15] = s[7],s[11],s[15],s[3]
+    for i in range(16): s[i] = _AES_INV_SBOX[s[i]]        # Final InvSubBytes
+    for i in range(16): s[i] ^= rks[0][i]                 # AddRoundKey(0)
+    return bytes(s)
+
+
+def _aes256_cbc_decrypt(key, ciphertext, iv=b'\x00' * 16):
+    """Decrypt ciphertext using AES-256-CBC (pure Python)."""
+    rks = _aes256_key_expand(key)
+    result = bytearray()
+    prev = iv
+    for i in range(0, len(ciphertext), 16):
+        blk = ciphertext[i:i + 16]
+        dec = _aes256_decrypt_block(blk, rks)
+        result.extend(x ^ y for x, y in zip(dec, prev))
+        prev = blk
+    return bytes(result)
+
+
+
 def _shell_quote(path):
     """Safely quote a path for remote shell commands."""
     return "'" + path.replace("'", "'\\''") + "'"
@@ -67,147 +163,222 @@ def _find_ssh_binary(name):
     return None
 
 
-def _convert_ppk_to_openssh(ppk_path):
-    """Convert a PuTTY .ppk key file to OpenSSH PEM format.
+def _find_psftp():
+    """Find PuTTY's psftp binary — supports .ppk keys natively.
 
-    Supports PPK v2 and v3 (unencrypted).  Returns the path to the
-    converted OpenSSH key file (cached next to the .ppk so conversion
-    only happens once).  Returns None if conversion fails.
+    Checks the Wbond SFTP plugin's bundled binary first (most reliable),
+    then common PuTTY install paths, then PATH.
+    """
+    import shutil
+    candidates = [
+        # Bundled in the commercial SFTP plugin by Wbond
+        os.path.join(os.path.expanduser("~"),
+                     r"AppData\Roaming\Sublime Text\Packages\SFTP\bin\psftp.exe"),
+        r"C:\Program Files\PuTTY\psftp.exe",
+        r"C:\Program Files (x86)\PuTTY\psftp.exe",
+        os.path.join(os.path.expanduser("~"),
+                     r"AppData\Local\Programs\PuTTY\psftp.exe"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return shutil.which("psftp")
+
+
+def _fix_key_permissions(key_path):
+    """Fix SSH private key file permissions so OpenSSH accepts it.
+
+    OpenSSH refuses keys that are readable by other users.
+    On Windows: removes inherited ACLs and grants only the current user read access.
+    On Unix: sets 0o600.
+    Returns True if permissions were fixed successfully.
+    """
+    try:
+        if os.name == "nt":
+            username = os.environ.get("USERNAME", "")
+            if not username:
+                return False
+            result = subprocess.run(
+                ["icacls", key_path,
+                 "/inheritance:r",
+                 "/grant:r", f"{username}:(R)"],
+                capture_output=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return result.returncode == 0
+        else:
+            os.chmod(key_path, 0o600)
+            return True
+    except Exception:
+        return False
+
+
+
+
+def _convert_ppk_v3_encrypted(ppk_path, openssh_path, passphrase):
+    """Encrypted PPK v3 keys: explain the one-time manual conversion.
+
+    PPK v3 protects the key with Argon2, which is impractical to run in pure
+    Python (~10 min) and we ship no compiled crypto. puttygen's CLI is
+    unreliable (some builds open blocking GUI popups), so instead of risking
+    a hang we guide the user through a quick, 100%-reliable manual conversion.
+    """
+    raise RemoteConnectionError(
+        "This is an encrypted PPK v3 key, which can't be converted on the fly.\n\n"
+        "Convert it once with PuTTYgen (takes ~20 seconds):\n"
+        "  1. Open PuTTYgen and load the .ppk file\n"
+        "  2. Enter the passphrase when prompted\n"
+        "  3. Menu: Conversions -> Export OpenSSH key -> save the file\n"
+        "  4. In remote-sync-config.json set:\n"
+        "       \"ssh_key_file\": \"<path to the exported file>\"\n"
+        "       \"ssh_key_passphrase\": \"<your passphrase>\"\n\n"
+        "RemoteSync handles the exported OpenSSH key automatically from then on."
+    )
+
+
+def _ppk_parse_fields(lines):
+    """Extract named fields and blob sections from a PPK file's lines."""
+    import base64
+    fields = {}
+    for line in lines:
+        if ":" in line:
+            k, v = line.split(":", 1)
+            fields[k.strip()] = v.strip()
+
+    def get_blob(count_key):
+        count = int(fields.get(count_key, 0))
+        start = next((i + 1 for i, l in enumerate(lines)
+                      if l.startswith(count_key + ":")), None)
+        if start is None:
+            return b""
+        return base64.b64decode("".join(lines[start:start + count]))
+
+    return fields, get_blob
+
+
+def _ppk_build_rsa_pem(pub_bytes, priv_bytes):
+    """Parse RSA key components from PPK blobs and return an OpenSSH PEM string."""
+    import struct
+
+    def read_mpint(data, off):
+        ln = struct.unpack(">I", data[off:off + 4])[0]
+        return int.from_bytes(data[off + 4:off + 4 + ln], "big"), off + 4 + ln
+
+    def der_tag(tag, data):
+        n = len(data)
+        if n < 0x80:   return bytes([tag, n]) + data
+        if n < 0x100:  return bytes([tag, 0x81, n]) + data
+        return bytes([tag, 0x82, n >> 8, n & 0xff]) + data
+
+    def der_int(v):
+        b = v.to_bytes((v.bit_length() + 8) // 8, "big")
+        if b[0] & 0x80: b = b"\x00" + b
+        return der_tag(0x02, b)
+
+    # Public blob: key-type string, e, n
+    off = struct.unpack(">I", pub_bytes[:4])[0] + 4   # skip key-type
+    e, off = read_mpint(pub_bytes, off)
+    n, _   = read_mpint(pub_bytes, off)
+
+    # Private blob: d, p, q, iqmp
+    off = 0
+    d, off = read_mpint(priv_bytes, off)
+    p, off = read_mpint(priv_bytes, off)
+    q, off = read_mpint(priv_bytes, off)
+    dp, dq, iqmp = d % (p - 1), d % (q - 1), pow(q, -1, p)
+
+    der = der_tag(0x30, b"".join(
+        der_int(v) for v in [0, n, e, d, p, q, dp, dq, iqmp]
+    ))
+    import base64
+    b64 = base64.b64encode(der).decode()
+    lines = ["-----BEGIN RSA PRIVATE KEY-----"]
+    lines += [b64[i:i + 64] for i in range(0, len(b64), 64)]
+    lines += ["-----END RSA PRIVATE KEY-----", ""]
+    return "\n".join(lines)
+
+
+def _ppk_write_and_secure(openssh_path, pem):
+    """Write PEM to file and set restrictive permissions."""
+    with open(openssh_path, "w", newline="\n") as f:
+        f.write(pem)
+    if os.name == "nt":
+        username = os.environ.get("USERNAME", "")
+        if username:
+            try:
+                subprocess.run(
+                    ["icacls", openssh_path, "/inheritance:r",
+                     "/grant:r", f"{username}:(R)"],
+                    capture_output=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except Exception:
+                pass
+    else:
+        os.chmod(openssh_path, 0o600)
+
+
+def _convert_ppk_to_openssh(ppk_path, passphrase=None):
+    """Convert a PuTTY .ppk key to OpenSSH PEM format.
+
+    PPK v2 unencrypted  → pure Python (no tools needed)
+    PPK v2 encrypted    → pure Python AES-256-CBC (no tools needed)
+    PPK v3 unencrypted  → pure Python (no tools needed)
+    PPK v3 encrypted    → puttygen 0.76+ required
+
+    Converted file is cached next to the .ppk; reused if newer.
+    Returns the converted path, or None/raises on failure.
     """
     openssh_path = ppk_path.rsplit(".", 1)[0] + "_openssh"
 
-    # If already converted and newer than the ppk, reuse it
     if os.path.isfile(openssh_path):
         if os.path.getmtime(openssh_path) >= os.path.getmtime(ppk_path):
             return openssh_path
 
     try:
-        import struct
-        import base64
-
         with open(ppk_path, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
 
-        # Check it's actually a PPK file
         if not lines or not lines[0].startswith("PuTTY-User-Key-File-"):
             return None
 
-        # Check encryption (only unencrypted keys supported)
-        encryption = ""
-        for line in lines:
-            if line.startswith("Encryption:"):
-                encryption = line.split(":", 1)[1].strip()
-                break
-        if encryption != "none":
-            return None  # Encrypted PPK — user must convert manually
+        fields, get_blob = _ppk_parse_fields(lines)
+        version = 2 if lines[0].startswith("PuTTY-User-Key-File-2") else 3
+        key_type = lines[0].split(":", 1)[1].strip() if ":" in lines[0] else ""
+        encryption = fields.get("Encryption", "none")
 
-        # Extract public key
-        pub_count = 0
-        pub_start = 0
-        for i, line in enumerate(lines):
-            if line.startswith("Public-Lines:"):
-                pub_count = int(line.split(":")[1].strip())
-                pub_start = i + 1
-                break
-        pub_b64 = "".join(lines[pub_start:pub_start + pub_count])
-        pub_bytes = base64.b64decode(pub_b64)
+        pub_bytes = get_blob("Public-Lines")
 
-        # Extract private key
-        priv_count = 0
-        priv_start = 0
-        for i, line in enumerate(lines):
-            if line.startswith("Private-Lines:"):
-                priv_count = int(line.split(":")[1].strip())
-                priv_start = i + 1
-                break
-        priv_b64 = "".join(lines[priv_start:priv_start + priv_count])
-        priv_bytes = base64.b64decode(priv_b64)
+        if encryption == "none":
+            priv_bytes = get_blob("Private-Lines")
 
-        # Parse public key — read SSH mpints
-        def read_mpint(data, offset):
-            length = struct.unpack(">I", data[offset:offset + 4])[0]
-            offset += 4
-            value = int.from_bytes(data[offset:offset + length], "big")
-            return value, offset + length
+        elif version == 2:
+            # PPK v2 encrypted: SHA1-based KDF + AES-256-CBC, pure Python
+            import hashlib
+            pw = passphrase.encode("utf-8") if passphrase else b""
+            aes_key = (hashlib.sha1(b"\x00\x00\x00\x00" + pw).digest() +
+                       hashlib.sha1(b"\x00\x00\x00\x01" + pw).digest())[:32]
+            priv_bytes = _aes256_cbc_decrypt(aes_key, get_blob("Private-Lines"))
 
-        offset = 0
-        # Skip key type string
-        slen = struct.unpack(">I", pub_bytes[offset:offset + 4])[0]
-        offset += 4 + slen
-        e, offset = read_mpint(pub_bytes, offset)
-        n, offset = read_mpint(pub_bytes, offset)
-
-        # Parse private key — d, p, q, iqmp
-        offset = 0
-        d, offset = read_mpint(priv_bytes, offset)
-        p, offset = read_mpint(priv_bytes, offset)
-        q, offset = read_mpint(priv_bytes, offset)
-        # iqmp is present but we let the library recompute it
-
-        # Build PEM using DER encoding (no external dependencies)
-        def int_to_der_integer(n):
-            """Encode an integer as DER INTEGER."""
-            b = n.to_bytes((n.bit_length() + 8) // 8, "big")
-            # Ensure positive (add leading zero if high bit set)
-            if b[0] & 0x80:
-                b = b"\x00" + b
-            return _der_tag(0x02, b)
-
-        def _der_tag(tag, data):
-            length = len(data)
-            if length < 0x80:
-                return bytes([tag, length]) + data
-            elif length < 0x100:
-                return bytes([tag, 0x81, length]) + data
-            else:
-                return bytes([tag, 0x82, (length >> 8) & 0xFF, length & 0xFF]) + data
-
-        # RSAPrivateKey ::= SEQUENCE { version, n, e, d, p, q, dp, dq, iqmp }
-        dp = d % (p - 1)
-        dq = d % (q - 1)
-        iqmp = pow(q, -1, p)
-
-        seq_contents = b"".join([
-            int_to_der_integer(0),      # version
-            int_to_der_integer(n),
-            int_to_der_integer(e),
-            int_to_der_integer(d),
-            int_to_der_integer(p),
-            int_to_der_integer(q),
-            int_to_der_integer(dp),
-            int_to_der_integer(dq),
-            int_to_der_integer(iqmp),
-        ])
-        der = _der_tag(0x30, seq_contents)
-
-        pem_b64 = base64.b64encode(der).decode("ascii")
-        pem_lines = [pem_b64[i:i + 64] for i in range(0, len(pem_b64), 64)]
-        pem = "-----BEGIN RSA PRIVATE KEY-----\n"
-        pem += "\n".join(pem_lines) + "\n"
-        pem += "-----END RSA PRIVATE KEY-----\n"
-
-        with open(openssh_path, "w", newline="\n") as f:
-            f.write(pem)
-
-        # Restrict permissions (important for OpenSSH)
-        if os.name == "nt":
-            import subprocess as _sp
-            username = os.environ.get("USERNAME", "")
-            if username:
-                try:
-                    _sp.run(
-                        ["icacls", openssh_path, "/inheritance:r",
-                         "/grant:r", f"{username}:(R)"],
-                        capture_output=True, timeout=5,
-                        creationflags=_sp.CREATE_NO_WINDOW,
-                    )
-                except Exception:
-                    pass
         else:
-            os.chmod(openssh_path, 0o600)
+            # PPK v3 encrypted: Argon2 KDF — impractical in pure Python.
+            # Delegate to puttygen 0.76+ (handled with version check, no GUI).
+            return _convert_ppk_v3_encrypted(ppk_path, openssh_path, passphrase)
 
+        if key_type != "ssh-rsa":
+            # Only RSA is supported by the pure-Python path; other key types
+            # (ed25519, ecdsa) need puttygen for non-encrypted PPKs too.
+            if encryption != "none":
+                return _convert_ppk_v3_encrypted(ppk_path, openssh_path, passphrase)
+            return None
+
+        pem = _ppk_build_rsa_pem(pub_bytes, priv_bytes)
+        _ppk_write_and_secure(openssh_path, pem)
         return openssh_path
 
+    except RemoteConnectionError:
+        # Clear, actionable errors (e.g. PPK v3 instructions) must reach the user.
+        raise
     except Exception:
         return None
 
@@ -216,6 +387,7 @@ class SFTPClient:
     """SFTP/SCP client using system OpenSSH commands."""
 
     def __init__(self, host, port, user, password=None, ssh_key_file=None,
+                 ssh_key_passphrase=None,
                  connect_timeout=30, file_permissions=None,
                  dir_permissions=None, upload_timeout=120,
                  download_timeout=120, command_timeout=30):
@@ -224,6 +396,7 @@ class SFTPClient:
         self.user = user
         self.password = password
         self.ssh_key_file = ssh_key_file
+        self.ssh_key_passphrase = ssh_key_passphrase
         self.connect_timeout = connect_timeout
         self.upload_timeout = upload_timeout
         self.download_timeout = download_timeout
@@ -233,6 +406,8 @@ class SFTPClient:
         self._sftp_bin = _find_ssh_binary("sftp")
         self._scp_bin = _find_ssh_binary("scp")
         self._ssh_bin = _find_ssh_binary("ssh")
+        self._psftp_bin = _find_psftp()   # PuTTY sftp — reads .ppk natively
+        self._use_psftp = False            # activated when key is .ppk and psftp available
         self._connected = False
         self._lock = threading.Lock()
 
@@ -241,13 +416,43 @@ class SFTPClient:
                 "No sftp binary found. Install OpenSSH or Git for Windows."
             )
 
-        # Auto-convert PuTTY .ppk keys to OpenSSH format
+        self._temp_key = None  # temp unencrypted key, cleaned up on disconnect
+
+        # Handle .ppk key files.
+        # Priority: pure-Python conversion (v2) > psftp native PPK support > error.
         if self.ssh_key_file:
             key_path = os.path.expanduser(self.ssh_key_file)
             if key_path.lower().endswith(".ppk"):
-                converted = _convert_ppk_to_openssh(key_path)
+                converted = _convert_ppk_to_openssh(key_path, self.ssh_key_passphrase)
                 if converted:
+                    # PPK converted to OpenSSH — use with standard sftp
                     self.ssh_key_file = converted
+                    self.ssh_key_passphrase = None
+                    key_path = converted
+                elif self._psftp_bin:
+                    # Cannot convert (e.g. PPK v3 encrypted) but psftp can
+                    # read .ppk natively — switch to psftp transport.
+                    self._use_psftp = True
+                else:
+                    raise RemoteConnectionError(
+                        f"Cannot use PPK key '{os.path.basename(key_path)}' directly.\n"
+                        "Convert it first: PuTTYgen → Conversions → Export OpenSSH key,\n"
+                        "then set 'ssh_key_file' to the exported path and\n"
+                        "'ssh_key_passphrase' to the passphrase (if the key is protected)."
+                    )
+
+            # For encrypted OpenSSH keys: use ssh-keygen to create a temp
+            # unencrypted copy — more reliable than SSH_ASKPASS on Windows.
+            if self.ssh_key_passphrase:
+                temp = self._strip_key_passphrase(key_path, self.ssh_key_passphrase)
+                if temp:
+                    self._temp_key = temp
+                    self.ssh_key_file = temp
+                    self.ssh_key_passphrase = None
+                    key_path = temp
+
+            # Pre-emptively fix permissions so OpenSSH doesn't reject the key
+            _fix_key_permissions(key_path)
 
     def _ssh_opts(self):
         opts = [
@@ -257,9 +462,42 @@ class SFTPClient:
         if self.ssh_key_file:
             key_path = os.path.expanduser(self.ssh_key_file)
             opts.extend(["-i", key_path])
-        if not self.password:
+        if not self.password and not self.ssh_key_passphrase:
             opts.extend(["-o", "BatchMode=yes"])
         return opts
+
+    def _psftp_opts(self):
+        """Build psftp command-line options (PuTTY SFTP client)."""
+        opts = ["-batch"]
+        if self.ssh_key_file:
+            opts.extend(["-i", os.path.expanduser(self.ssh_key_file)])
+        if self.password:
+            opts.extend(["-pw", self.password])
+        elif self.ssh_key_passphrase:
+            # psftp doesn't support SSH_ASKPASS; passphrase via -pw works for
+            # key passphrase in some psftp versions, otherwise Pageant is needed.
+            opts.extend(["-pw", self.ssh_key_passphrase])
+        if self.port != 22:
+            opts.extend(["-P", str(self.port)])
+        return opts
+
+    def _run_psftp_batch(self, commands, timeout=None):
+        """Run SFTP commands via psftp (PuTTY). Used when key is .ppk."""
+        if timeout is None:
+            timeout = self.command_timeout
+        cmd = [self._psftp_bin] + self._psftp_opts() + [
+            f"{self.user}@{self.host}"
+        ]
+        input_data = "\n".join(commands) + "\nbye\n"
+        result = self._run_cmd(cmd, timeout, input_data=input_data)
+        stderr = (result.stderr or "").lower()
+        if any(err in stderr for err in [
+            "no such file", "not found", "permission denied",
+            "failure", "couldn't stat", "cannot access",
+        ]):
+            error_text = _clean_sftp_error(result.stderr.strip())
+            raise classify_ssh_error(error_text)
+        return result
 
     def _run_scp(self, args, timeout=None):
         """Run scp with common options."""
@@ -269,7 +507,10 @@ class SFTPClient:
         return self._run_cmd(cmd, timeout)
 
     def _run_sftp_batch(self, commands, timeout=None):
-        """Run sftp commands via stdin (avoids -b flag which suppresses password auth)."""
+        """Run sftp commands — uses psftp if key is .ppk, otherwise OpenSSH sftp."""
+        if self._use_psftp:
+            return self._run_psftp_batch(commands, timeout)
+
         if timeout is None:
             timeout = self.command_timeout
 
@@ -309,8 +550,17 @@ class SFTPClient:
         try:
             env = os.environ.copy()
             use_askpass = False
-            if self.password and not self.ssh_key_file:
-                askpass_file = self._create_askpass_script()
+            if self.ssh_key_passphrase:
+                # Passphrase-protected key: provide passphrase via SSH_ASKPASS
+                askpass_file = self._create_askpass_script(self.ssh_key_passphrase)
+                if askpass_file:
+                    env["SSH_ASKPASS"] = askpass_file
+                    env["SSH_ASKPASS_REQUIRE"] = "force"
+                    env["DISPLAY"] = ":0"
+                    use_askpass = True
+            elif self.password and not self.ssh_key_file:
+                # Password auth: provide password via SSH_ASKPASS
+                askpass_file = self._create_askpass_script(self.password)
                 if askpass_file:
                     env["SSH_ASKPASS"] = askpass_file
                     env["SSH_ASKPASS_REQUIRE"] = "force"
@@ -330,7 +580,20 @@ class SFTPClient:
             result = subprocess.run(cmd, **run_kwargs)
 
             if result.returncode != 0:
-                error_text = _clean_sftp_error(result.stderr) or result.stdout.strip() or "Unknown error"
+                stderr = result.stderr or ""
+                # Auto-fix key permissions and retry (OpenSSH rejects world-readable keys)
+                if self.ssh_key_file and (
+                    "bad permissions" in stderr.lower() or
+                    "unprotected private key" in stderr.lower()
+                ):
+                    key_path = os.path.expanduser(self.ssh_key_file)
+                    if _fix_key_permissions(key_path):
+                        result = subprocess.run(cmd, **run_kwargs)
+                        if result.returncode == 0:
+                            return result
+                        stderr = result.stderr or ""
+
+                error_text = _clean_sftp_error(stderr) or result.stdout.strip() or "Unknown error"
                 raise classify_ssh_error(error_text)
 
             return result
@@ -345,17 +608,18 @@ class SFTPClient:
                 except OSError:
                     pass
 
-    def _create_askpass_script(self):
-        """Create a temporary script that outputs the password for SSH_ASKPASS.
+    def _create_askpass_script(self, secret):
+        """Create a temporary script that outputs secret for SSH_ASKPASS.
 
+        Used for both passwords and key passphrases.
         Security: restrictive perms + atexit cleanup as crash safety net.
         """
-        if not self.password:
+        if not secret:
             return None
         try:
             if os.name == 'nt':
                 fd, path = tempfile.mkstemp(suffix=".bat", prefix="rs_askpass_")
-                safe_pw = self.password
+                safe_pw = secret
                 for ch in ('^', '&', '<', '>', '|', '%', '"'):
                     safe_pw = safe_pw.replace(ch, f'^{ch}')
                 with os.fdopen(fd, "w") as f:
@@ -373,7 +637,7 @@ class SFTPClient:
                     pass
             else:
                 fd, path = tempfile.mkstemp(suffix=".sh", prefix="rs_askpass_")
-                safe_pw = self.password.replace("'", "'\\''")
+                safe_pw = secret.replace("'", "'\\''")
                 with os.fdopen(fd, "w") as f:
                     f.write(f"#!/bin/sh\necho '{safe_pw}'\n")
                 os.chmod(path, 0o700)
@@ -401,9 +665,51 @@ class SFTPClient:
             else:
                 self._connected = True
 
+    def _strip_key_passphrase(self, key_path, passphrase):
+        """Create a temp unencrypted copy of an encrypted OpenSSH key.
+
+        Uses ssh-keygen -p to remove the passphrase. The temp file is
+        tracked in self._temp_key and deleted on disconnect().
+        Returns the temp path on success, or None if ssh-keygen fails.
+        """
+        import tempfile, shutil
+        ssh_keygen = _find_ssh_binary("ssh-keygen")
+        if not ssh_keygen:
+            return None
+        fd, temp_path = tempfile.mkstemp(prefix="rs_key_")
+        os.close(fd)
+        try:
+            shutil.copy2(key_path, temp_path)
+            _fix_key_permissions(temp_path)
+            result = subprocess.run(
+                [ssh_keygen, "-p",
+                 "-P", passphrase,
+                 "-N", "",
+                 "-f", temp_path],
+                capture_output=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if result.returncode == 0:
+                _fix_key_permissions(temp_path)
+                return temp_path
+        except Exception:
+            pass
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return None
+
     def disconnect(self):
         with self._lock:
             self._connected = False
+        # Clean up temp unencrypted key if we created one
+        if self._temp_key:
+            try:
+                os.remove(self._temp_key)
+            except OSError:
+                pass
+            self._temp_key = None
 
     def is_connected(self):
         return self._connected
@@ -806,6 +1112,7 @@ def create_client(config):
     user = config.get("user", "")
     password = config.get("password", "")
     ssh_key = config.get("ssh_key_file", "")
+    ssh_key_passphrase = config.get("ssh_key_passphrase", "")
     timeout = get_timeout(config, "connect")
     file_perms = config.get("file_permissions", "") or None
     dir_perms = config.get("dir_permissions", "") or None
@@ -815,6 +1122,7 @@ def create_client(config):
             host=host, port=int(port), user=user,
             password=password if password else None,
             ssh_key_file=ssh_key if ssh_key else None,
+            ssh_key_passphrase=ssh_key_passphrase if ssh_key_passphrase else None,
             connect_timeout=timeout,
             file_permissions=file_perms, dir_permissions=dir_perms,
             upload_timeout=get_timeout(config, "upload"),

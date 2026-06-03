@@ -298,6 +298,7 @@ DEFAULT_CONFIG_TEMPLATE = """\
     //"confirm_downloads": false,
 
     //"ssh_key_file": "~/.ssh/id_rsa",
+    //"ssh_key_passphrase": "",  // passphrase for encrypted SSH private keys
     "connect_timeout": 30,
     //"keepalive": 120,
 
