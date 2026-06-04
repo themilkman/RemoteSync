@@ -67,6 +67,11 @@
                 "caption": "Edit Server Config...",
                 "command": "remote_sync_edit_server_config",
                 "args": { "paths": [] }
+            },
+            {
+                "caption": "Show Effective Config",
+                "command": "remote_sync_show_effective_config",
+                "args": { "paths": [] }
             }
         ]
     }

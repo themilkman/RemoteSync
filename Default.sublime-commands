@@ -6,6 +6,7 @@
     { "caption": "RemoteSync: Show Panel", "command": "remote_sync_show_panel" },
     { "caption": "RemoteSync: Clear Panel", "command": "remote_sync_clear_panel" },
     { "caption": "RemoteSync: Create Config", "command": "remote_sync_create_config" },
+    { "caption": "RemoteSync: Show Effective Config", "command": "remote_sync_show_effective_config" },
     { "caption": "RemoteSync: Cancel Operations", "command": "remote_sync_cancel" },
     { "caption": "RemoteSync: Disconnect All", "command": "remote_sync_disconnect" }
 ]

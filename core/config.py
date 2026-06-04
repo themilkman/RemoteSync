@@ -37,18 +37,52 @@ def invalidate_cache(config_path=None):
 # Locate config
 # ---------------------------------------------------------------------------
 
+def find_all_configs(file_path):
+    """Return every config in the chain from file_path up to the filesystem root.
+
+    Ordered nearest-first: [(nearest_cfg, nearest_dir), ..., (root_cfg, root_dir)].
+    Used to detect nested configs and resolve inherit_root_only.
+    """
+    chain = []
+    if not file_path:
+        return chain
+    d = os.path.dirname(file_path)
+    while d:
+        cfg = os.path.join(d, CONFIG_FILENAME)
+        if os.path.isfile(cfg):
+            chain.append((cfg, d))
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return chain
+
+
+def _root_only_requested(chain):
+    """True if the outermost (root) config in the chain sets inherit_root_only."""
+    if not chain:
+        return False
+    root_cfg, _ = chain[-1]
+    try:
+        cfg = load_config(root_cfg, validate=False)
+        return bool(cfg.get("inherit_root_only", False))
+    except Exception:
+        return False
+
+
 def find_config(file_path, folders=None):
-    """Find config by walking up from file_path or checking project folders."""
+    """Find the config that applies to file_path.
+
+    By default uses the NEAREST config (walking up). If the outermost/root
+    config sets "inherit_root_only": true, that root config is used instead,
+    ignoring any nested configs — useful for single-destination projects.
+    """
     if file_path:
-        d = os.path.dirname(file_path)
-        while d:
-            cfg = os.path.join(d, CONFIG_FILENAME)
-            if os.path.isfile(cfg):
-                return cfg, d
-            parent = os.path.dirname(d)
-            if parent == d:
-                break
-            d = parent
+        chain = find_all_configs(file_path)
+        if chain:
+            if len(chain) > 1 and _root_only_requested(chain):
+                return chain[-1]   # root config wins
+            return chain[0]        # nearest config (default)
 
     if folders:
         for folder in folders:
@@ -327,6 +361,10 @@ DEFAULT_CONFIG_TEMPLATE = """\
 
     // Automatically create remote directories if they don't exist
     "auto_create_dirs": true,
+
+    // Single destination: ignore any nested remote-sync-config.json files
+    // and always use THIS (root) config for the whole project.
+    //"inherit_root_only": true,
 
     // Quick way to exclude files by extension (no regex needed)
     //"exclude_extensions": [".log", ".tmp", ".zip", ".gz", ".bak"],

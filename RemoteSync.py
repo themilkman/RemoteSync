@@ -26,8 +26,9 @@ import threading
 from functools import wraps
 
 from .core.config import (
-    find_config, load_config, get_remote_path, create_default_config,
-    invalidate_cache, CONFIG_FILENAME, should_ignore, get_timeout,
+    find_config, find_all_configs, load_config, get_remote_path,
+    create_default_config, invalidate_cache, CONFIG_FILENAME,
+    should_ignore, get_timeout,
 )
 from .core.sftp_client import create_client, _shell_quote
 from .core.errors import (
@@ -120,6 +121,49 @@ def _should_ignore(file_path, rel_path, config, remote_size=None):
     return should_ignore(file_path, rel_path, config, remote_size=remote_size)
 
 
+# Windows already warned about nested configs (by window id) — avoids spam.
+_nested_warned = set()
+_SKIP_SCAN_DIRS = {".git", ".svn", "node_modules", "__pycache__",
+                   ".hg", "vendor", "dist", "build", ".venv", "venv"}
+
+
+def _scan_nested_configs(window):
+    """Find all remote-sync-config.json files across the project folders.
+
+    Returns a list of absolute config paths. Skips heavy/irrelevant dirs.
+    """
+    found = []
+    for root_folder in window.folders():
+        for dirpath, dirnames, filenames in os.walk(root_folder):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_SCAN_DIRS]
+            if CONFIG_FILENAME in filenames:
+                found.append(os.path.join(dirpath, CONFIG_FILENAME))
+    return found
+
+
+def _warn_nested_configs_once(window):
+    """If the project has 2+ configs, log a one-time explanation panel."""
+    if not window or window.id() in _nested_warned:
+        return
+    _nested_warned.add(window.id())
+
+    def _do_scan():
+        configs = _scan_nested_configs(window)
+        if len(configs) < 2:
+            return
+        panel.log_separator(window)
+        panel.log(window, "⚠ Found %d remote-sync-config.json files in this project:" % len(configs))
+        for cfg in configs:
+            panel.log(window, "    %s" % cfg)
+        panel.log(window, "Files use the NEAREST config (walking up the tree).")
+        panel.log(window, "Right-click a file → RemoteSync → \"Show Effective Config\" to verify.")
+        panel.log(window, "To force a single destination, set \"inherit_root_only\": true in the root config.")
+
+    # Run the filesystem walk off the UI thread
+    import threading
+    threading.Thread(target=_do_scan, daemon=True).start()
+
+
 def _no_config_msg(window):
     msg = "RemoteSync: No remote-sync-config.json found."
     sublime.status_message(msg)
@@ -189,8 +233,10 @@ def _run_post_upload(config, client, window):
 class RemoteSyncEventListener(sublime_plugin.EventListener):
     def on_activated(self, view):
         """Update status bar when switching views."""
-        if view.window():
-            pool.update_status_bar(view.window())
+        window = view.window()
+        if window:
+            pool.update_status_bar(window)
+            _warn_nested_configs_once(window)
 
     def on_post_save_async(self, view):
         file_path = view.file_name()
@@ -1205,6 +1251,75 @@ class RemoteSyncEditServerConfigCommand(sublime_plugin.WindowCommand):
             self.window.open_file(config_file)
         else:
             sublime.status_message("RemoteSync: No config found for this path.")
+
+    def is_visible(self, paths=None, dirs=None):
+        items = dirs or paths
+        return bool(items) and _has_config_for_paths(items, self.window)
+
+
+class RemoteSyncShowEffectiveConfigCommand(sublime_plugin.WindowCommand):
+    """Show which config applies to a file and the exact local→remote mapping."""
+    def run(self, paths=None, dirs=None):
+        window = self.window
+        target = (paths or dirs or [None])[0]
+        if not target:
+            # Invoked from command palette — use the active file
+            view = window.active_view()
+            target = view.file_name() if view else None
+        if not target:
+            sublime.status_message("RemoteSync: No file selected.")
+            return
+        lookup = os.path.join(target, "dummy") if os.path.isdir(target) else target
+
+        config_file, project_root = find_config(lookup, window.folders())
+        if not config_file:
+            sublime.message_dialog(
+                "RemoteSync\n\nNo remote-sync-config.json found for:\n%s" % target
+            )
+            return
+
+        chain = find_all_configs(lookup)
+        lines = []
+        lines.append("Effective RemoteSync config")
+        lines.append("=" * 40)
+        lines.append("File:    %s" % target)
+        lines.append("")
+        lines.append("Using config: %s" % config_file)
+        lines.append("Project root: %s" % project_root)
+
+        try:
+            config = load_config(config_file, validate=False)
+            host = config.get("host", "?")
+            conn_type = config.get("type", "sftp")
+            remote_base = config.get("remote_path", "/")
+            lines.append("")
+            lines.append("Server:  %s://%s" % (conn_type, host))
+            lines.append("Remote base: %s" % remote_base)
+            if not os.path.isdir(target):
+                remote_path = get_remote_path(config, target, project_root)
+                lines.append("")
+                lines.append("This file uploads to:")
+                lines.append("  → %s" % remote_path)
+        except Exception as e:
+            lines.append("")
+            lines.append("(could not parse config: %s)" % e)
+
+        if len(chain) > 1:
+            lines.append("")
+            lines.append("⚠ %d nested configs found (nearest wins):" % len(chain))
+            for cfg, d in chain:
+                marker = "  ► " if cfg == config_file else "    "
+                lines.append("%s%s" % (marker, cfg))
+            lines.append("")
+            lines.append("Tip: set \"inherit_root_only\": true in the root")
+            lines.append("config to always use it and ignore nested ones.")
+
+        text = "\n".join(lines)
+        panel.log_separator(window)
+        for ln in lines:
+            panel.log(window, ln)
+        window.run_command("show_panel", {"panel": "output.%s" % panel.PANEL_NAME})
+        sublime.message_dialog("RemoteSync\n\n" + text)
 
     def is_visible(self, paths=None, dirs=None):
         items = dirs or paths

@@ -52,7 +52,15 @@ A `remote-sync-config.json` file will be created. Fill in your server details:
 ```
 
 ### Multiple servers
-Place a separate `remote-sync-config.json` in each subfolder. Files will automatically use the nearest config when saved.
+Place a separate `remote-sync-config.json` in each subfolder. Files automatically use the **nearest** config (walking up the tree) when saved.
+
+When the project has more than one config, RemoteSync:
+- Logs a one-time notice listing every config and which folders they cover.
+- Shows the absolute remote path in the output panel for every upload/download, so you can see exactly where each file lands.
+
+To verify which config applies to a file, right-click it → **RemoteSync → Show Effective Config** (also in the command palette). It shows the resolved config, the local→remote mapping, and any nested configs.
+
+**Single destination?** Set `"inherit_root_only": true` in the root config to ignore all nested configs and always use the root.
 
 ## Configuration
 

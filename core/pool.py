@@ -388,7 +388,7 @@ def parallel_operation(files, operation_fn, config, project_root, window,
         try:
             client = _get_worker_conn()
         except Exception as e:
-            panel.log(window, f'{op_label} "{rel_path}" ......... failure ({e})', error=True)
+            panel.log(window, f'{op_label} "{rel_path}" → {remote_path} ......... failure ({e})', error=True)
             with lock:
                 errors[0] += 1
             return
@@ -407,7 +407,7 @@ def parallel_operation(files, operation_fn, config, project_root, window,
 
         # Display with animated dots (one worker at a time)
         with display_lock:
-            panel.animate_progress(window, f'{op_label} "{rel_path}"', op_done)
+            panel.animate_progress(window, f'{op_label} "{rel_path}" → {remote_path}', op_done)
             elapsed = time.monotonic() - t0
             if op_error[0] is None:
                 panel.log_complete(window, success=True, elapsed=elapsed)
@@ -468,7 +468,7 @@ def serial_operation(files, operation_fn, config, project_root, window,
             panel.tracked(
                 lambda lp=local_path, rp=remote_path: operation_fn(client, lp, rp),
                 window,
-                f'{op_label} "{rel_path}"'
+                f'{op_label} "{rel_path}" → {remote_path}'
             )
             completed += 1
             sublime.set_timeout(
