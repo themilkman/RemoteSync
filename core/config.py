@@ -439,9 +439,35 @@ DEFAULT_CONFIG_TEMPLATE = """\
 """
 
 
+INHERITED_CONFIG_TEMPLATE = """\
+{
+    // This config shares the server of the parent config above it.
+    // It inherits host, user, password, etc. — you only set what changes.
+
+    "inherit_parent": true,
+
+    // Where THIS folder's files go on the server.
+    // (Everything else comes from the parent config.)
+    "remote_path": "%(remote_path)s"
+
+    // Need a different user/password/port here too? Just add the key, e.g.:
+    //, "user": "another-user"
+}
+"""
+
+
 def create_default_config(project_root):
     """Create a default remote-sync-config.json template."""
     path = os.path.join(project_root, CONFIG_FILENAME)
     with open(path, "w", encoding="utf-8") as f:
         f.write(DEFAULT_CONFIG_TEMPLATE)
+    return path
+
+
+def create_inherited_config(folder, suggested_remote_path="/path/to/remote/"):
+    """Create a minimal nested config that inherits from its parent."""
+    path = os.path.join(folder, CONFIG_FILENAME)
+    content = INHERITED_CONFIG_TEMPLATE % {"remote_path": suggested_remote_path}
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
     return path

@@ -27,8 +27,8 @@ from functools import wraps
 
 from .core.config import (
     find_config, find_all_configs, _find_parent_config, load_config,
-    get_remote_path, create_default_config, invalidate_cache, CONFIG_FILENAME,
-    should_ignore, get_timeout,
+    get_remote_path, create_default_config, create_inherited_config,
+    invalidate_cache, CONFIG_FILENAME, should_ignore, get_timeout,
 )
 from .core.sftp_client import create_client, _shell_quote
 from .core.errors import (
@@ -1342,9 +1342,53 @@ class RemoteSyncCreateConfigSidebarCommand(sublime_plugin.WindowCommand):
         if os.path.exists(config_path):
             self.window.open_file(config_path)
             return
-        path = create_default_config(folder)
-        self.window.open_file(path)
-        sublime.status_message("RemoteSync: Created remote-sync-config.json — edit it with your server details.")
+
+        # Is this folder inside a project that already has a server config?
+        parent_cfg = _find_parent_config(os.path.join(folder, CONFIG_FILENAME))
+        if parent_cfg:
+            self._create_with_parent_choice(folder, parent_cfg)
+        else:
+            path = create_default_config(folder)
+            self.window.open_file(path)
+            sublime.status_message("RemoteSync: Created remote-sync-config.json — edit it with your server details.")
+
+    def _create_with_parent_choice(self, folder, parent_cfg):
+        """Ask whether this nested config shares the parent server or is independent."""
+        choice = sublime.yes_no_cancel_dialog(
+            "This folder is inside a project that already has a server "
+            "configuration:\n\n%s\n\n"
+            "Does this folder use the SAME server (just a different remote "
+            "folder), or a DIFFERENT server?" % parent_cfg,
+            "Same server (inherit)",       # yes
+            "Different server",            # no
+        )
+        if choice == sublime.DIALOG_CANCEL:
+            return
+
+        if choice == sublime.DIALOG_YES:
+            # Inherit: suggest a remote_path based on parent's remote_path + relative folder
+            suggested = "/path/to/remote/"
+            try:
+                parent = load_config(parent_cfg, validate=False)
+                base = parent.get("remote_path", "/").rstrip("/")
+                parent_dir = os.path.dirname(parent_cfg)
+                rel = os.path.relpath(folder, parent_dir).replace("\\", "/")
+                suggested = base + "/" + rel
+            except Exception:
+                pass
+            path = create_inherited_config(folder, suggested)
+            self.window.open_file(path)
+            sublime.status_message(
+                "RemoteSync: Created a config that inherits from the parent — "
+                "just confirm the remote path."
+            )
+        else:
+            # Independent: full template
+            path = create_default_config(folder)
+            self.window.open_file(path)
+            sublime.status_message(
+                "RemoteSync: Created an independent config — fill in the server details."
+            )
 
     def is_visible(self, dirs=None):
         if not dirs:
