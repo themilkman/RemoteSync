@@ -203,8 +203,31 @@ def validate_config(config, config_path=""):
 # Load (with cache + validation)
 # ---------------------------------------------------------------------------
 
+def _find_parent_config(config_path):
+    """Find the next remote-sync-config.json above config_path's directory.
+
+    Used for inherit_parent: starts the search from the PARENT of the
+    directory holding config_path so it doesn't return config_path itself.
+    """
+    d = os.path.dirname(os.path.dirname(config_path))
+    while d:
+        cfg = os.path.join(d, CONFIG_FILENAME)
+        if os.path.isfile(cfg):
+            return cfg
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return None
+
+
 def load_config(config_path, validate=True):
     """Load and parse config JSON (supports // comments and trailing commas).
+
+    If the config sets "inherit_parent": true, it is merged on top of the
+    nearest parent config (parent provides the base, this config overrides),
+    so a nested config can define only what differs (e.g. remote_path) while
+    inheriting host/user/password from the parent.
 
     Uses mtime-based cache so repeated calls (e.g. on_post_save) skip
     disk I/O when the file hasn't changed.
@@ -230,11 +253,35 @@ def load_config(config_path, validate=True):
     except json.JSONDecodeError as e:
         raise ConfigError(f"Invalid JSON in {config_path}: {e}")
 
+    # Inheritance: merge onto the parent config when requested.
+    inherited = False
+    if config.get("inherit_parent"):
+        parent_path = _find_parent_config(config_path)
+        if parent_path:
+            try:
+                parent = load_config(parent_path, validate=False)
+                # Parent is the base; this config's keys win.
+                config = {**parent, **config}
+                inherited = True
+            except ConfigError as e:
+                raise ConfigError(
+                    f"{os.path.basename(config_path)} has \"inherit_parent\" "
+                    f"but the parent config is invalid: {e}"
+                )
+        else:
+            raise ConfigError(
+                f"{os.path.basename(config_path)} sets \"inherit_parent\": true "
+                f"but no parent remote-sync-config.json was found above it."
+            )
+
     if validate:
         validate_config(config, config_path)
 
-    with _cache_lock:
-        _cache[config_path] = {"mtime": current_mtime, "config": config}
+    # Don't cache inherited configs: the parent may change independently and
+    # we can't see that via this file's mtime. Re-merging is cheap.
+    if not inherited:
+        with _cache_lock:
+            _cache[config_path] = {"mtime": current_mtime, "config": config}
 
     return config
 
@@ -330,6 +377,11 @@ DEFAULT_CONFIG_TEMPLATE = """\
     "upload_on_save": true,
     //"save_before_upload": true,
     //"confirm_downloads": false,
+
+    // Nested config that shares the parent's server? Set inherit_parent
+    // and define ONLY what changes (e.g. just remote_path). Credentials,
+    // host, etc. are inherited from the nearest config above this one.
+    //"inherit_parent": true,
 
     //"ssh_key_file": "~/.ssh/id_rsa",
     //"ssh_key_passphrase": "",  // passphrase for encrypted SSH private keys

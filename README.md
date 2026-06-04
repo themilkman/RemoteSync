@@ -62,6 +62,22 @@ To verify which config applies to a file, right-click it → **RemoteSync → Sh
 
 **Single destination?** Set `"inherit_root_only": true` in the root config to ignore all nested configs and always use the root.
 
+### Config inheritance
+
+A nested config can **share the parent's server** and override only what changes. Set `"inherit_parent": true` and define just the differing keys:
+
+```json
+// root: full credentials
+{ "host": "h", "user": "u", "password": "p", "remote_path": "/var/www/site" }
+
+// themes/custom/remote-sync-config.json — same server, different folder
+{ "inherit_parent": true, "remote_path": "/var/www/site/themes/custom" }
+```
+
+The nested config inherits `host`, `user`, `password`, etc. from the nearest config above it. Change the password once in the root and every inheriting config follows.
+
+Without `inherit_parent`, a nested config is fully **independent** — use this when the subfolder targets a completely different server.
+
 ## Configuration
 
 | Key | Default | Description |

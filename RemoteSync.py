@@ -26,8 +26,8 @@ import threading
 from functools import wraps
 
 from .core.config import (
-    find_config, find_all_configs, load_config, get_remote_path,
-    create_default_config, invalidate_cache, CONFIG_FILENAME,
+    find_config, find_all_configs, _find_parent_config, load_config,
+    get_remote_path, create_default_config, invalidate_cache, CONFIG_FILENAME,
     should_ignore, get_timeout,
 )
 from .core.sftp_client import create_client, _shell_quote
@@ -1288,11 +1288,17 @@ class RemoteSyncShowEffectiveConfigCommand(sublime_plugin.WindowCommand):
         lines.append("Project root: %s" % project_root)
 
         try:
-            config = load_config(config_file, validate=False)
+            # Read raw (no merge) to detect inheritance, then effective (merged)
+            raw = load_config(config_file, validate=False)
+            inherits = bool(raw.get("inherit_parent"))
+            config = raw
             host = config.get("host", "?")
             conn_type = config.get("type", "sftp")
             remote_base = config.get("remote_path", "/")
             lines.append("")
+            if inherits:
+                parent = _find_parent_config(config_file)
+                lines.append("Inherits from: %s" % (parent or "(parent not found!)"))
             lines.append("Server:  %s://%s" % (conn_type, host))
             lines.append("Remote base: %s" % remote_base)
             if not os.path.isdir(target):
