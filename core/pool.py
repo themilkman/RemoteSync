@@ -14,8 +14,74 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from .sftp_client import create_client
-from .errors import is_retryable, RemoteConnectionError
+from .errors import is_retryable, is_rate_limit, RemoteConnectionError
 from . import panel
+
+
+class _AdaptiveLimiter:
+    """AIMD concurrency limiter — TCP-style congestion control for SSH.
+
+    The server never advertises how many simultaneous connections it accepts
+    (sshd MaxStartups is private), so we discover it: halve the limit when the
+    server rejects handshakes (multiplicative decrease), and after a clean
+    streak of successes probe one more slot (additive increase). Each batch
+    converges on the server's real tolerance instead of a guessed constant.
+    """
+
+    def __init__(self, initial, maximum, window=None):
+        self._limit = max(1, initial)
+        self._max = max(1, maximum)
+        self._active = 0
+        self._success_streak = 0
+        self._last_decrease = 0.0
+        self._cv = threading.Condition()
+        self._window = window
+
+    def acquire(self):
+        with self._cv:
+            while self._active >= self._limit:
+                self._cv.wait()
+            self._active += 1
+
+    def release(self):
+        with self._cv:
+            self._active -= 1
+            self._cv.notify_all()
+
+    def on_rate_limit(self):
+        """Server rejected a handshake — halve the concurrency (min 1)."""
+        with self._cv:
+            now = time.monotonic()
+            # A burst of parallel rejections is ONE congestion event — react
+            # once, not once per worker (mirrors TCP's once-per-RTT rule).
+            if now - self._last_decrease < 2.0:
+                return
+            new_limit = max(1, self._limit // 2)
+            if new_limit < self._limit:
+                self._limit = new_limit
+                self._success_streak = 0
+                self._last_decrease = now
+                if self._window:
+                    panel.log(self._window,
+                              f"⇣ Server is rate-limiting SSH connections — "
+                              f"reducing to {new_limit} parallel connection(s)")
+
+    def on_success(self):
+        """Clean operation — after a full streak, probe one more slot."""
+        with self._cv:
+            if self._limit >= self._max:
+                return
+            self._success_streak += 1
+            # Require every current slot to complete ~3 clean ops before
+            # probing upward — cautious growth, fast backoff.
+            if self._success_streak >= self._limit * 3:
+                self._limit += 1
+                self._success_streak = 0
+                self._cv.notify_all()
+                if self._window:
+                    panel.log(self._window,
+                              f"⇡ Server is keeping up — increasing to "
+                              f"{self._limit} parallel connection(s)")
 
 
 # ---------------------------------------------------------------------------
@@ -356,14 +422,15 @@ def parallel_operation(files, operation_fn, config, project_root, window,
     lock = threading.Lock()
     display_lock = threading.Lock()
 
-    # Create a pool of reusable connections
+    # Create a pool of reusable connections, gated by an adaptive limiter
+    # that discovers how many simultaneous connections the server tolerates.
     conn_pool = []
-    conn_semaphore = threading.Semaphore(max_workers)
+    limiter = _AdaptiveLimiter(initial=max_workers, maximum=max_workers, window=window)
     conn_pool_lock = threading.Lock()
 
     def _get_worker_conn():
         """Get a connection from pool or create a new one."""
-        conn_semaphore.acquire()
+        limiter.acquire()
         with conn_pool_lock:
             if conn_pool:
                 return conn_pool.pop()
@@ -376,7 +443,7 @@ def parallel_operation(files, operation_fn, config, project_root, window,
         """Return a connection to the pool."""
         with conn_pool_lock:
             conn_pool.append(client)
-        conn_semaphore.release()
+        limiter.release()
 
     # Retry budget for transient errors (SSH rate-limiting / dropped handshakes).
     # Ensure a sensible floor even when the user didn't set retry_count, because
@@ -397,11 +464,12 @@ def parallel_operation(files, operation_fn, config, project_root, window,
                     attempts_used[0] = attempt + 1
                     try:
                         if client is None:
-                            client = _get_worker_conn()   # acquires semaphore
+                            client = _get_worker_conn()   # acquires limiter slot
                         operation_fn(client, local_path, remote_path)
                         op_error[0] = None
-                        _return_worker_conn(client)        # releases semaphore
+                        _return_worker_conn(client)        # releases limiter slot
                         client = None
+                        limiter.on_success()
                         return
                     except Exception as e:
                         op_error[0] = str(e)
@@ -411,10 +479,14 @@ def parallel_operation(files, operation_fn, config, project_root, window,
                                 client.disconnect()
                             except Exception:
                                 pass
-                            conn_semaphore.release()
+                            limiter.release()
                             client = None
                         if not is_retryable(e) or attempt >= max_retries:
                             return
+                        if is_rate_limit(e):
+                            # Tell the limiter so the WHOLE batch slows down,
+                            # instead of every worker re-hammering the server.
+                            limiter.on_rate_limit()
                         # Exponential backoff with jitter — desyncs workers so
                         # they don't all re-handshake at once (eases MaxStartups).
                         delay = min(1.5 * (2 ** attempt), 15) + random.uniform(0, 1.5)

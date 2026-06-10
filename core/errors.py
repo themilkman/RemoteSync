@@ -88,6 +88,21 @@ def is_retryable(error):
     ))
 
 
+def is_rate_limit(error):
+    """Return True if the error looks like server-side connection rate-limiting.
+
+    sshd's MaxStartups drops NEW connections during handshake — the telltale
+    signatures are kex/handshake failures and abrupt closes/resets. Used by the
+    adaptive limiter to know when to reduce parallel connections (as opposed
+    to plain timeouts, which don't necessarily mean "too many connections").
+    """
+    text = str(error).lower()
+    return any(s in text for s in (
+        "kex_exchange_identification", "connection closed",
+        "connection reset",
+    ))
+
+
 def user_friendly_message(error):
     """Return a clear, user-friendly error message for popup dialogs."""
     if isinstance(error, AuthenticationError):
