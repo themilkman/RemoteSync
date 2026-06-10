@@ -9,6 +9,7 @@ Thread-safe connection management with:
 
 import sublime
 import time
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -377,28 +378,47 @@ def parallel_operation(files, operation_fn, config, project_root, window,
             conn_pool.append(client)
         conn_semaphore.release()
 
+    # Retry budget for transient errors (SSH rate-limiting / dropped handshakes).
+    # Ensure a sensible floor even when the user didn't set retry_count, because
+    # MaxStartups rejections are expected during large parallel batches.
+    max_retries = max(int(config.get("retry_count", 0)), 4)
+
     def _worker(item):
         local_path, remote_path, rel_path = item
         t0 = time.monotonic()
-        client = None
         op_done = threading.Event()
         op_error = [None]
+        attempts_used = [0]
 
-        # Get connection
-        try:
-            client = _get_worker_conn()
-        except Exception as e:
-            panel.log(window, f'{op_label} "{rel_path}" → {remote_path} ......... failure ({e})', error=True)
-            with lock:
-                errors[0] += 1
-            return
-
-        # Run the operation in a sub-thread so we can animate dots
         def _run_op():
+            client = None
             try:
-                operation_fn(client, local_path, remote_path)
-            except Exception as e:
-                op_error[0] = str(e)
+                for attempt in range(max_retries + 1):
+                    attempts_used[0] = attempt + 1
+                    try:
+                        if client is None:
+                            client = _get_worker_conn()   # acquires semaphore
+                        operation_fn(client, local_path, remote_path)
+                        op_error[0] = None
+                        _return_worker_conn(client)        # releases semaphore
+                        client = None
+                        return
+                    except Exception as e:
+                        op_error[0] = str(e)
+                        # Drop the (likely dead) connection and free its slot
+                        if client is not None:
+                            try:
+                                client.disconnect()
+                            except Exception:
+                                pass
+                            conn_semaphore.release()
+                            client = None
+                        if not is_retryable(e) or attempt >= max_retries:
+                            return
+                        # Exponential backoff with jitter — desyncs workers so
+                        # they don't all re-handshake at once (eases MaxStartups).
+                        delay = min(1.5 * (2 ** attempt), 15) + random.uniform(0, 1.5)
+                        time.sleep(delay)
             finally:
                 op_done.set()
 
@@ -410,7 +430,8 @@ def parallel_operation(files, operation_fn, config, project_root, window,
             panel.animate_progress(window, f'{op_label} "{rel_path}" → {remote_path}', op_done)
             elapsed = time.monotonic() - t0
             if op_error[0] is None:
-                panel.log_complete(window, success=True, elapsed=elapsed)
+                retry_note = "" if attempts_used[0] <= 1 else f" (after {attempts_used[0]} attempts)"
+                panel.log_complete(window, success=True, elapsed=elapsed, detail=retry_note)
             else:
                 panel.log_complete(window, success=False, detail=op_error[0])
 
@@ -418,8 +439,6 @@ def parallel_operation(files, operation_fn, config, project_root, window,
 
         # Bookkeeping
         if op_error[0] is None:
-            _return_worker_conn(client)
-            client = None
             with lock:
                 completed[0] += 1
                 n = completed[0]
@@ -429,12 +448,6 @@ def parallel_operation(files, operation_fn, config, project_root, window,
         else:
             with lock:
                 errors[0] += 1
-            if client:
-                try:
-                    client.disconnect()
-                except Exception:
-                    pass
-                conn_semaphore.release()
 
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:

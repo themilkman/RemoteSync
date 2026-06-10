@@ -62,7 +62,12 @@ def classify_ssh_error(stderr_text):
         return ConnectionTimeoutError(stderr_text)
     if "connection refused" in text or "no route to host" in text:
         return ConnectionLostError(stderr_text)
-    if "broken pipe" in text or "connection reset" in text:
+    # SSH server rate-limiting (MaxStartups) and dropped handshakes — these are
+    # transient: the server momentarily refused a new connection. Worth retrying.
+    if ("kex_exchange_identification" in text
+            or "connection closed" in text
+            or "connection reset" in text
+            or "broken pipe" in text):
         return ConnectionLostError(stderr_text)
     if "no such file" in text or "not a regular file" in text:
         return PermissionDeniedError(stderr_text)
@@ -71,8 +76,16 @@ def classify_ssh_error(stderr_text):
 
 
 def is_retryable(error):
-    """Return True if the error is worth retrying."""
-    return isinstance(error, (ConnectionTimeoutError, ConnectionLostError))
+    """Return True if the error is worth retrying (transient/connection-level)."""
+    if isinstance(error, (ConnectionTimeoutError, ConnectionLostError)):
+        return True
+    # Some errors arrive as plain strings/other exceptions from batch workers;
+    # match the transient SSH signatures defensively.
+    text = str(error).lower()
+    return any(s in text for s in (
+        "kex_exchange_identification", "connection closed",
+        "connection reset", "broken pipe", "timed out",
+    ))
 
 
 def user_friendly_message(error):

@@ -193,6 +193,8 @@ def log_complete(window, success=True, detail="", elapsed=None):
 
     if success:
         result = f"success ({elapsed:.1f}s)" if elapsed is not None else "success"
+        if detail:
+            result += detail   # e.g. " (after 3 attempts)"
     else:
         if detail:
             # Show first error line inline, rest on separate lines

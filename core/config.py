@@ -424,7 +424,10 @@ DEFAULT_CONFIG_TEMPLATE = """\
     // Auto-retry failed uploads/downloads
     //"retry_count": 2,
 
-    // Parallel connections for folder uploads/downloads (1-8, default 4)
+    // Parallel connections for folder uploads/downloads (1-8, default 4).
+    // Lower this (e.g. 2) if the server drops connections with errors like
+    // "kex_exchange_identification" — that means it rate-limits new SSH
+    // connections (sshd MaxStartups). RemoteSync also auto-retries these.
     //"parallel_connections": 4,
 
     // Max lines in the output panel before auto-truncation (0 = unlimited)
