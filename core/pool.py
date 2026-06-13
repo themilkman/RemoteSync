@@ -14,7 +14,9 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from .sftp_client import create_client
-from .errors import is_retryable, is_rate_limit, RemoteConnectionError
+from .errors import (
+    is_retryable, is_rate_limit, RemoteConnectionError, ConnectionLostError,
+)
 from . import panel
 
 
@@ -212,7 +214,13 @@ def get_connection(config, project_root, window=None):
                 client = _connections[project_root]
                 if client.is_connected():
                     return client
-        raise RemoteConnectionError("Connection failed (another attempt already tried)")
+        # The other attempt failed (often transient rate-limiting). Raise a
+        # retryable error so with_retry backs off and this thread tries to
+        # connect itself — the jitter desyncs the waiters so they don't all
+        # re-handshake at once.
+        raise ConnectionLostError(
+            "Concurrent connection attempt failed — retrying"
+        )
 
     conn_type = config.get("type", "sftp").upper()
     host = config.get("host", "?")
