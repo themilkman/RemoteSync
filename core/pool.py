@@ -347,12 +347,15 @@ def disconnect_all(window=None):
 # ---------------------------------------------------------------------------
 
 def with_retry(fn, config, window=None, project_root=None):
-    """Run fn with automatic retries based on config retry_count.
+    """Run fn with automatic retries on transient errors.
 
-    Uses is_retryable() — only retries on timeout/connection-lost errors,
-    not on auth failures or permission errors.
+    Uses is_retryable() — only retries timeout/connection-lost/rate-limit
+    errors, never auth failures or permission errors. A floor of retries is
+    applied even when retry_count is 0, because SSH rate-limiting
+    (kex_exchange_identification) is common when many uploads fire at once
+    (e.g. ClaudeSync dispatching a batch) and almost always recovers.
     """
-    retries = int(config.get("retry_count", 0))
+    retries = max(int(config.get("retry_count", 0)), 4)
     last_error = None
 
     for attempt in range(1 + retries):
@@ -361,9 +364,11 @@ def with_retry(fn, config, window=None, project_root=None):
         except Exception as e:
             last_error = e
             if attempt < retries and is_retryable(e):
-                delay = 2 * (attempt + 1)
+                # Exponential backoff with jitter — desyncs concurrent uploads
+                # so they don't all re-handshake at once (eases MaxStartups).
+                delay = min(1.5 * (2 ** attempt), 15) + random.uniform(0, 1.5)
                 if window:
-                    panel.log(window, f"Retry {attempt + 1}/{retries} in {delay}s — {e}")
+                    panel.log(window, f"Retry {attempt + 1} in {delay:.1f}s — {e}")
                 time.sleep(delay)
                 # Force reconnect
                 with _pool_lock:
@@ -390,8 +395,8 @@ def with_retry(fn, config, window=None, project_root=None):
                     except Exception:
                         pass
                 sublime.set_timeout(lambda: update_status_bar(), 0)
-            elif attempt < retries:
-                # Non-retryable error — fail immediately
+            else:
+                # Non-retryable error, or retries exhausted — stop.
                 break
     raise last_error
 

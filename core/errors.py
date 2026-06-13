@@ -136,3 +136,17 @@ def is_critical(error):
         ConnectionLostError, RemoteConnectionError, ConfigError,
         ScanTimeoutError,
     ))
+
+
+def is_user_actionable(error):
+    """Return True for errors the user MUST fix before anything will work.
+
+    These always warrant an interrupting modal dialog (wrong credentials,
+    untrusted host key, broken config). Everything else — dropped/reset
+    connections, timeouts, rate-limiting — is transient or environmental:
+    it's logged to the output panel and shown in the status bar, but a modal
+    per failed file would be overwhelming during a multi-file batch.
+    """
+    return isinstance(error, (
+        AuthenticationError, HostKeyError, ConfigError, ScanTimeoutError,
+    ))

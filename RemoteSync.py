@@ -33,7 +33,7 @@ from .core.config import (
 from .core.sftp_client import create_client, _shell_quote
 from .core.errors import (
     RemoteConnectionError, ConnectionTimeoutError, ScanTimeoutError,
-    ConfigError, is_critical, user_friendly_message,
+    ConfigError, is_critical, is_user_actionable, user_friendly_message,
 )
 from .core import panel
 from .core import pool
@@ -43,6 +43,40 @@ from .core.scanner import fast_scan
 
 # Global operation queue
 _op_queue = OperationQueue()
+
+
+# Throttle for transient-error popups so a multi-file batch can't stack
+# dozens of identical "Connection lost" dialogs.
+import time as _time
+_last_transient_popup = [0.0]
+_TRANSIENT_POPUP_COOLDOWN = 20.0  # seconds
+
+
+def _report_error(error, window):
+    """Surface an error appropriately: modal for must-fix, panel for transient.
+
+    - User-actionable errors (auth, host key, config) always show a modal.
+    - Transient/environmental errors (dropped/reset connection, timeout,
+      rate-limiting) go to the output panel and status bar; a modal is shown
+      at most once per cooldown so concurrent failures don't spam dialogs.
+    """
+    msg = user_friendly_message(error)
+    if window:
+        panel.log(window, msg.replace("\n\n", " — ").replace("\n", " "), error=True)
+
+    if is_user_actionable(error):
+        sublime.set_timeout(
+            lambda: sublime.error_message(f"RemoteSync\n\n{msg}"), 0
+        )
+        return
+
+    if is_critical(error):
+        now = _time.monotonic()
+        if now - _last_transient_popup[0] >= _TRANSIENT_POPUP_COOLDOWN:
+            _last_transient_popup[0] = now
+            sublime.set_timeout(
+                lambda: sublime.error_message(f"RemoteSync\n\n{msg}"), 0
+            )
 
 
 # =============================================================================
@@ -84,12 +118,7 @@ def run_async(on_success=None, on_error=None, config=None, window=None,
                         sublime.set_timeout(
                             lambda: sublime.status_message(f"RemoteSync: {err_str}"), 0
                         )
-                    # Show popup dialog for critical errors
-                    if is_critical(e):
-                        msg = user_friendly_message(e)
-                        sublime.set_timeout(
-                            lambda: sublime.error_message(f"RemoteSync\n\n{msg}"), 0
-                        )
+                    _report_error(e, window)
             threading.Thread(target=_task, daemon=True).start()
         # Auto-invoke: the decorator calls the function immediately
         wrapper()
@@ -273,25 +302,26 @@ class RemoteSyncEventListener(sublime_plugin.EventListener):
                 panel.log(window, f"[{conn_type}] Saving and uploading {rel_path}...")
                 if not _run_pre_upload(config, window):
                     raise Exception("pre_upload_command failed")
-                client = pool.get_connection(config, project_root, window)
                 file_size = panel.format_size(os.path.getsize(file_path)) if os.path.isfile(file_path) else ""
                 size_info = f" ({file_size})" if file_size else ""
-                panel.tracked(
-                    lambda: client.upload(file_path, remote_path),
-                    window,
-                    f'Uploading "{rel_path}"{size_info} to "{remote_path}"'
-                )
-                _run_post_upload(config, client, window)
+
+                def _attempt():
+                    client = pool.get_connection(config, project_root, window)
+                    panel.tracked(
+                        lambda: client.upload(file_path, remote_path),
+                        window,
+                        f'Uploading "{rel_path}"{size_info} to "{remote_path}"'
+                    )
+                    _run_post_upload(config, client, window)
+
+                # Retry transient errors (rate-limiting / dropped connection)
+                pool.with_retry(_attempt, config, window, project_root=project_root)
                 panel.log(window, f"[{conn_type}] Uploaded {rel_path}")
                 sublime.set_timeout(lambda: view.set_status("remotesync", f"Uploaded {rel_path}"), 0)
             except Exception as e:
                 sublime.set_timeout(lambda: view.set_status("remotesync", "Upload failed"), 0)
                 panel.log(window, f"[{conn_type}] Upload failed: {rel_path} — {e}", error=True)
-                if is_critical(e):
-                    msg = user_friendly_message(e)
-                    sublime.set_timeout(
-                        lambda: sublime.error_message(f"RemoteSync\n\n{msg}"), 0
-                    )
+                _report_error(e, window)
 
         def _show_panel():
             panel._get_panel(window)
